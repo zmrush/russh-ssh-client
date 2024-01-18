@@ -4,7 +4,7 @@ mod extract_websocket_stream;
 mod async_fs_stream;
 use std::sync::Arc;
 use async_trait::async_trait;
-use command::command_loop;
+use command::{command_loop, ExecCommands};
 use env_logger::Target;
 use russh::*;
 use russh_keys::*;
@@ -14,10 +14,13 @@ use log::info;
 use std::io::Write;
 #[cfg(feature = "vsock-support")]
 use tokio_vsock::VsockStream;
+
 use crossterm::terminal::disable_raw_mode;
 use crate::extract_websocket_stream::ExtractWebsocketStream;
+use clap::{Parser,Subcommand};
 
 struct Client {}
+
 
 #[async_trait]
 impl client::Handler for Client {
@@ -28,6 +31,47 @@ impl client::Handler for Client {
         _: &key::PublicKey,
     ) -> std::result::Result<(Self, bool), Self::Error> {
         Ok((self, true))
+    }
+}
+
+
+/// ssh args
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    #[cfg(feature="vsock-support")]
+    /// cid
+    #[arg(short, long)]
+    cid: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+#[derive(Subcommand, Debug)]
+enum Commands{
+    /// exec command
+    Exec{
+        #[command(subcommand)]
+        command: ExecCommands,
+    },
+    /// ssh to remote
+    Ssh{
+        /// term
+        #[arg(short, long, default_value_t = String::from("xterm-256color"))]
+        term: String,
+    },
+    /// sftp command
+    Sftp{
+        /// if from remote to local
+        #[arg(short, long, default_value_t = false)]
+        reverse: bool,
+        /// remote location
+        #[arg(short, long)]
+        remote: String,
+
+        /// local location
+        #[arg(short, long)]
+        local: String,
     }
 }
 
@@ -54,15 +98,7 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>>{
     .target(Target::Pipe(target))
     .init();
 
-    let mut line = String::new();
-    let mut stdout = std::io::stdout();
-    stdout.write_all(b"command:")?;
-    stdout.flush()?;
-    let _ = std::io::stdin().read_line(&mut line).unwrap();
-    if line.trim() == "true"{
-        let _ = command_loop().await;
-        return Ok(());
-    }
+
 
     let config = client::Config {
         inactivity_timeout: Some(std::time::Duration::from_secs(5)),
@@ -70,11 +106,9 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>>{
     };
     let config = Arc::new(config);
     let sh = Client {};
-
-   
-    let term = "xterm-256color";
-
     let key_pair = load_secret_key(home_dir + "/.ssh/id_ed25519", None)?;
+    let args = Args::parse();
+
 
     // websocket
     //------------------------------------------------------------------------------------------------------------------------
@@ -87,46 +121,31 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>>{
     //websocket - over tcp
     //------------------------------------------------------------------------------------------------------------------------
     #[cfg(not(feature="vsock-support"))]
-    let (key_pair,wsss) = {
+    let wsss = {
         let tcp_socket = tokio::net::TcpSocket::new_v4().unwrap();
         let tcp_stream = tcp_socket.connect("127.0.0.1:7777".parse().unwrap()).await?;
         let request = "ws://127.0.0.1:1077/ops/ssh";
         let (ws_stream,_) = client_async(request, tcp_stream).await?;
-        (key_pair, ExtractWebsocketStream{websocket:ws_stream,byte_buffer: ByteBuffer::new()})
+        ExtractWebsocketStream{ websocket: ws_stream, byte_buffer: ByteBuffer::new() }
     };
     //------------------------------------------------------------------------------------------------------------------------
 
     //tcp
     //------------------------------------------------------------------------------------------------------------------------
     // #[cfg(not(feature="vsock-support"))]
-    // let (key_pair,wsss) = {
-    //     let wsss = tokio::net::TcpStream::connect(("127.0.0.1", 22))
-    //     .await.unwrap();
-    //     (key_pair,wsss)
-    // };
+    // let wsss = tokio::net::TcpStream::connect(("127.0.0.1", 22)).await.unwrap();
+
     //------------------------------------------------------------------------------------------------------------------------
 
     // websocket - over vsock
     //------------------------------------------------------------------------------------------------------------------------
     #[cfg(feature="vsock-support")]
-    let (key_pair,wsss) = {
-        let mut line = String::new();
-        let mut stdout = std::io::stdout();
-        stdout.write_all(b"cid:")?;
-        stdout.flush()?;
-        let _ = std::io::stdin().read_line(&mut line)?;
-        let cid = u32::from_str_radix(line.trim(),10)?;
-        println!("cid:{}",cid);
-        stdout.write_all(b"term:")?;
-        stdout.flush()?;
-        line = String::new();
-        let _ = std::io::stdin().read_line(&mut line)?;
-        let term = line.trim();
-        println!("term:{}",term);
+    let wsss = {
+        let cid = u32::from_str_radix(args.cid.as_ref().unwrap(),10)?;
         let vsock_stream = VsockStream::connect(cid, 1027).await?;
         let request = "ws://127.0.0.1:1027/ops/ssh";
         let (ws_stream,_) = client_async(request, vsock_stream).await?;
-        (key_pair,WebsocketStream{websocket:ws_stream,byte_buffer:ByteBuffer::new()})
+        ExtractWebsocketStream{ websocket: ws_stream, byte_buffer: ByteBuffer::new() }
     };
     //------------------------------------------------------------------------------------------------------------------------
 
@@ -134,53 +153,68 @@ async fn main() -> std::result::Result<(), Box<dyn std::error::Error>>{
     let _auth_res = session
     .authenticate_publickey("zhuming", Arc::new(key_pair))
     .await?;
-    let mut channel = session.channel_open_session().await?;
+    let channel = session.channel_open_session().await?;
 
-    let mut line = String::new();
-    let mut stdout = std::io::stdout();
-    stdout.write_all(b"sftp:")?;
-    stdout.flush()?;
-    let stdin = std::io::stdin();
-    let _ = stdin.read_line(&mut line).unwrap();
-    if line.trim() == "true"{
-        use russh_sftp::client::SftpSession;
-        line = String::new();
-        let _ = stdin.read_line(&mut line).unwrap();
-        let mut split = line.trim().split_whitespace();
-        match (split.next(),split.next(),split.next()){
-            (Some(_),Some(remote),Some(local)) =>{
-                //从远端到近端
-                channel.request_subsystem(true, "sftp").await?;
-                let sftp = SftpSession::new(channel.into_stream()).await?;
-                let mut remote_file = sftp.open(remote).await?;
-                let mut local_file = tokio::fs::OpenOptions::new().create(true).write(true).open(local).await?;
-                tokio::io::copy(&mut remote_file,&mut local_file).await?;
-                info!("copy finish");
-                return Ok(());
-            }
-            (Some(local),Some(remote),None) =>{
-                // read write append truncate create create_new
-                //从近端到远端
-                channel.request_subsystem(true, "sftp").await?;
-                let sftp = SftpSession::new(channel.into_stream()).await?;
-                let mut local_file = tokio::fs::OpenOptions::new().read(true).open(local).await?;
-                let mut remote_file = sftp.create(remote).await?;
-                tokio::io::copy(&mut local_file,&mut remote_file).await?;
-                info!("copy finish");
-                return Ok(());
-            }
-            _ =>{
-                info!("dont know what to do");
-                return Ok(());
+
+    if let Some(sub_cmd) = args.command{
+        match sub_cmd{
+            Commands::Exec { command } =>{
+                let res = command_loop(
+                    #[cfg(feature="vsock-support")]
+                    args.cid,
+                    command
+                ).await;
+                if res.is_err(){
+                    info!("exec command error:{:?}",res.err())
+                }
+            },
+            Commands::Ssh { term } =>{
+                //异常的情况下，我们要额外进行一次disable raw mode
+                let ex = ssh::ssh_loop(term.as_str(), channel).await.or_else(|e| {
+                    disable_raw_mode()?;
+                    Err(e)
+                });
+                info!("ex:{:?}",ex);
+            },
+            Commands::Sftp { reverse, remote, local } =>{
+                let res = sftp_loop(reverse, remote, local, channel).await;
+                info!("sftp res:{:?}",res);
             }
         }
-
     }
-    //异常的情况下，我们要额外进行一次disable raw mode
-    ssh::ssh_loop(term, channel).await.or_else(|e| {
-        disable_raw_mode()?;
-        Err(e)
-    })?;
+    Ok(())
+}
+use russh_sftp::client::SftpSession;
+use russh::client::Msg;
+pub async fn sftp_loop(reverse: bool,remote: String,local: String,mut channel: Channel<Msg>) -> std::result::Result<(),Box<dyn std::error::Error>>{
+    if reverse{
+        //从远端到近端
+        info!("request");
+        channel.request_subsystem(true, "sftp").await?;
+        info!("session");
+        let sftp = SftpSession::new(channel.into_stream()).await?;
+        info!("remote file");
+        let mut remote_file = sftp.open(remote).await?;
+        info!("local file");
+        let mut local_file = tokio::fs::OpenOptions::new().create(true).write(true).open(local).await?;
+        info!("start to copy");
+        tokio::io::copy(&mut remote_file,&mut local_file).await?;
+        info!("copy finish");
+    }else{
+        // read write append truncate create create_new
+        //从近端到远端
+        info!("request");
+        channel.request_subsystem(true, "sftp").await?;
+        info!("session");
+        let sftp = SftpSession::new(channel.into_stream()).await?;
+        info!("local file");
+        let mut local_file = tokio::fs::OpenOptions::new().read(true).open(local).await?;
+        info!("remote file");
+        let mut remote_file = sftp.create(remote).await?;
+        info!("start to copy");
+        tokio::io::copy(&mut local_file,&mut remote_file).await?;
+        info!("copy finish");
+    }
     Ok(())
 }
 

@@ -50,9 +50,10 @@ rolling-file = "0.2.0"
 chrono = {version= "0.4"}
 signal-hook = { version = "0.3.17"}
 signal-hook-tokio = { version = "0.3.1",features = ["futures-v0_3"]}
+clap = {version = "4.4.18", features = ["derive"]}
 
 
 [features]
 vsock-support = ["tokio-vsock"]
-default = []
+# default = ["vsock-support"]
 
