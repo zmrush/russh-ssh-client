@@ -1,0 +1,58 @@
+[package]
+name = "russh-ssh-client"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+tokio = { version = "1.33.0", features = [
+    "io-util",
+    "rt-multi-thread",
+    "time",
+    "net",
+    "sync",
+    "macros",
+    "process",
+    "io-std"
+] }
+tokio-util = "0.7"
+russh = { version = "0.39.0",features = ["openssl"]}
+russh-keys = {version = "0.38.0",features = ["vendored-openssl"]}
+russh-sftp = "2.0.0-beta.2"
+anyhow = "1.0"
+env_logger = "0.10"
+rand = "0.8.5"
+nix = "0.25"
+libc = "0.2.95"
+log = "0.4"
+async-trait = "0.1"
+futures = "0.3"
+futures-util = "0.3"
+warp = "0.3"
+# signal-hook = "0.1.16"
+tokio-stream = "0.1.14"
+tokio-tungstenite = "0.20"
+url = "2.3.1"
+bytebuffer = "2.1.0"
+tokio-vsock = { version = "0.4",optional = true}
+crossterm = { version = "0.27",features = ["events","event-stream"]}
+futures-timer = "3.0"
+strfmt = "0.2.4"
+bytes = "1.0"
+serde = {version = "1.0.117", features = ["derive"] }
+serde_json = "1.0.59"
+serde_urlencoded  ="0.7"
+hyper = { version = "0.14", features = ["server", "client", "http1", "runtime","stream"] }
+tower-service = "0.3.2"
+http = "0.2"
+rolling-file = "0.2.0"
+chrono = {version= "0.4"}
+signal-hook = { version = "0.3.17"}
+signal-hook-tokio = { version = "0.3.1",features = ["futures-v0_3"]}
+
+
+[features]
+vsock-support = ["tokio-vsock"]
+default = []
+
